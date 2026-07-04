@@ -62,6 +62,7 @@ struct BlockType {
 
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
 enum PreviewShape {
+    Wall,
     #[default]
     Cube,
     Cross,
@@ -71,6 +72,7 @@ enum PreviewShape {
 impl PreviewShape {
     fn label(&self) -> &'static str {
         match self {
+            PreviewShape::Wall => "Wall (X-Y)",
             PreviewShape::Cube => "Cube",
             PreviewShape::Cross => "Cross / X",
             PreviewShape::Torch => "Torch",
@@ -85,7 +87,6 @@ struct TextureWorkspace {
     texture: Option<TextureHandle>,
     checker_texture: Option<TextureHandle>,
     brush_color: Color32,
-    brush_size: f32,
     tool: Tool,
     canvas_size_setting: usize, // 8, 16, 32, 64
     zoom: f32,
@@ -110,7 +111,6 @@ impl Default for TextureWorkspace {
             texture: None,
             checker_texture: None,
             brush_color: Color32::from_rgb(205, 214, 244),
-            brush_size: 1.0,
             tool: Tool::Brush,
             canvas_size_setting: 16,
             zoom: 1.0,
@@ -132,9 +132,9 @@ impl TextureWorkspace {
             self.canvas.as_raw(),
         );
         if let Some(tex) = &mut self.texture {
-            tex.set(color_img, TextureOptions::default());
+            tex.set(color_img, TextureOptions::NEAREST);
         } else {
-            self.texture = Some(ctx.load_texture("tex_canvas", color_img, TextureOptions::default()));
+            self.texture = Some(ctx.load_texture("tex_canvas", color_img, TextureOptions::NEAREST));
         }
     }
 
@@ -187,8 +187,9 @@ impl TextureWorkspace {
         }
     }
 
+    /// Colors exactly the single target pixel (plus mirrored counterparts, if
+    /// mirroring is on). No radius, no falloff — one click, one pixel.
     fn stamp(&mut self, cx: u32, cy: u32) {
-        let r = self.brush_size.ceil() as i32;
         let (rr, gg, bb, aa) = match self.tool {
             Tool::Brush => (self.brush_color.r(), self.brush_color.g(), self.brush_color.b(), self.brush_color.a()),
             Tool::Eraser => (0, 0, 0, 0),
@@ -197,31 +198,19 @@ impl TextureWorkspace {
         let w = self.canvas.width() as i32;
         let h = self.canvas.height() as i32;
 
-        let positions: Vec<(i32, i32)> = if self.mirror_x || self.mirror_y {
-            let mut pts = Vec::new();
+        let mut positions: Vec<(i32, i32)> = vec![(cx as i32, cy as i32)];
+        if self.mirror_x || self.mirror_y {
             let mx = w - 1 - cx as i32;
             let my = h - 1 - cy as i32;
-            pts.push((cx as i32, cy as i32));
-            if self.mirror_x { pts.push((mx, cy as i32)); }
-            if self.mirror_y { pts.push((cx as i32, my)); }
-            if self.mirror_x && self.mirror_y { pts.push((mx, my)); }
-            pts
-        } else {
-            vec![(cx as i32, cy as i32)]
-        };
+            if self.mirror_x { positions.push((mx, cy as i32)); }
+            if self.mirror_y { positions.push((cx as i32, my)); }
+            if self.mirror_x && self.mirror_y { positions.push((mx, my)); }
+        }
 
-        for (ox, oy) in &positions {
-            for dy in -r..=r {
-                for dx in -r..=r {
-                    if dx * dx + dy * dy <= r * r {
-                        let x = ox + dx;
-                        let y = oy + dy;
-                        if x >= 0 && y >= 0 && x < w && y < h {
-                            let pixel = self.canvas.get_pixel_mut(x as u32, y as u32);
-                            *pixel = Rgba([rr, gg, bb, aa]);
-                        }
-                    }
-                }
+        for (x, y) in positions {
+            if x >= 0 && y >= 0 && x < w && y < h {
+                let pixel = self.canvas.get_pixel_mut(x as u32, y as u32);
+                *pixel = Rgba([rr, gg, bb, aa]);
             }
         }
     }
@@ -385,6 +374,10 @@ struct AtlasApp {
     block_types: Vec<BlockType>,
     show_preview_window: bool,
     preview_shape: PreviewShape,
+    preview_yaw: f32,
+    preview_pitch: f32,
+    show_custom_color_window: bool,
+    blocking_window_rects: Vec<egui::Rect>,
 }
 
 impl Default for AtlasApp {
@@ -402,6 +395,10 @@ impl Default for AtlasApp {
             block_types: Vec::new(),
             show_preview_window: false,
             preview_shape: PreviewShape::Cube,
+            preview_yaw: 0.6,
+            preview_pitch: 0.5,
+            show_custom_color_window: false,
+            blocking_window_rects: Vec::new(),
         }
     }
 }
@@ -495,7 +492,7 @@ impl AtlasApp {
                     let texture = ctx.load_texture(
                         format!("cell_{idx}"),
                         color_image,
-                        TextureOptions::default(),
+                        TextureOptions::NEAREST,
                     );
 
                     let src_name = path
@@ -664,7 +661,7 @@ impl AtlasApp {
             let texture = ctx.load_texture(
                 format!("cell_{idx}"),
                 color_image,
-                TextureOptions::default(),
+                TextureOptions::NEAREST,
             );
 
             self.cells[idx].image = Some(sub);
@@ -862,12 +859,6 @@ impl AtlasApp {
             }
             if i.key_pressed(egui::Key::Minus) {
                 self.texture.zoom = (self.texture.zoom - 0.25).max(0.25);
-            }
-            if i.key_pressed(egui::Key::OpenBracket) {
-                self.texture.brush_size = (self.texture.brush_size - 1.0).max(1.0).round();
-            }
-            if i.key_pressed(egui::Key::CloseBracket) {
-                self.texture.brush_size = (self.texture.brush_size + 1.0).min(8.0).round();
             }
         });
     }
@@ -1125,6 +1116,33 @@ ui.label(
                                 if accent_button(ui, " \u{1f9ca} 3D Preview ", preview_fill, preview_txt) {
                                     self.show_preview_window = !self.show_preview_window;
                                 }
+                                ui.add_space(8.0);
+
+                                // Color button — always visible here regardless of
+                                // sidebar layout, with a live swatch of the current
+                                // brush color baked into the button itself.
+                                let color_btn_fill = if self.show_custom_color_window { C_TEAL.gamma_multiply(0.15) } else { C_SURFACE0 };
+                                let color_btn_txt = if self.show_custom_color_window { C_TEAL } else { C_SUBTEXT };
+                                let color_btn = egui::Button::new(
+                                    egui::RichText::new(" \u{1f3a8} Color   ").color(color_btn_txt).size(13.0),
+                                )
+                                .fill(color_btn_fill)
+                                .corner_radius(CornerRadius::same(5));
+                                let color_resp = ui.add(color_btn);
+                                let swatch_rect = egui::Rect::from_min_size(
+                                    color_resp.rect.right_top() + egui::vec2(-16.0, 6.0),
+                                    egui::vec2(10.0, 10.0),
+                                );
+                                ui.painter().rect_filled(swatch_rect, CornerRadius::same(2), self.texture.brush_color);
+                                ui.painter().rect_stroke(
+                                    swatch_rect,
+                                    CornerRadius::same(2),
+                                    Stroke::new(1.0, Color32::from_gray(140)),
+                                    egui::StrokeKind::Middle,
+                                );
+                                if color_resp.clicked() {
+                                    self.show_custom_color_window = !self.show_custom_color_window;
+                                }
                             });
                         }
                     }
@@ -1237,6 +1255,10 @@ ui.painter().rect_filled(rect, CornerRadius::same(2), color);
                                 ui.set_width(200.0);
                                 ui.set_min_height(ui.available_height());
 
+                                egui::ScrollArea::vertical()
+                                    .auto_shrink([false, false])
+                                    .show(ui, |ui| {
+
                                 // ── Color section (top ~50%) — WHITE bg, BLACK border ──
                                 egui::Frame {
                                     fill: Color32::WHITE,
@@ -1256,44 +1278,64 @@ ui.painter().rect_filled(rect, CornerRadius::same(2), color);
                                         );
                                         ui.add_space(8.0);
 
-                                        // Color picker
-                                        ui.horizontal(|ui| {
-                                            let (rect, _) = ui.allocate_exact_size(
-                                                egui::vec2(24.0, 24.0),
-                                                egui::Sense::hover(),
-                                            );
-                                            ui.painter().rect_filled(rect, CornerRadius::same(3), self.texture.brush_color);
-                                            ui.painter().rect_stroke(
-                                                rect,
-                                                CornerRadius::same(3),
-                                                Stroke::new(1.0, Color32::from_gray(180)),
-                                                egui::StrokeKind::Middle,
-                                            );
-                                            ui.add_space(6.0);
-                                            ui.color_edit_button_srgba(&mut self.texture.brush_color);
-                                        });
+                                        // Full color picker — embedded directly and
+                                        // always visible, exactly the wheel + hex +
+                                        // alpha slider widget, no extra click needed.
+                                        egui::color_picker::color_picker_color32(
+                                            ui,
+                                            &mut self.texture.brush_color,
+                                            egui::color_picker::Alpha::OnlyBlend,
+                                        );
 
-                                        ui.add_space(6.0);
+                                        ui.add_space(8.0);
 
-                                        // Brush size
+                                        // Preset palette — a second, always-reliable way to
+                                        // change the paint color (in case the native color
+                                        // wheel popup is finicky on some platforms).
                                         ui.label(
-                                            egui::RichText::new("brush size")
+                                            egui::RichText::new("palette")
                                                 .size(11.0)
                                                 .color(Color32::from_gray(80))
                                                 .strong(),
                                         );
                                         ui.add_space(4.0);
-                                        ui.horizontal(|ui| {
-                                            let prev = self.texture.brush_size;
-                                            ui.add(
-                                                egui::Slider::new(&mut self.texture.brush_size, 1.0..=8.0)
-                                                    .step_by(1.0)
-                                                    .text("px"),
-                                            );
-                                            if self.texture.brush_size != prev {
-                                                self.texture.brush_size = self.texture.brush_size.round();
-                                            }
-                                        });
+                                        const PALETTE: [Color32; 12] = [
+                                            Color32::from_rgb(0, 0, 0),
+                                            Color32::from_rgb(255, 255, 255),
+                                            Color32::from_rgb(136, 136, 136),
+                                            Color32::from_rgb(200, 60, 60),
+                                            Color32::from_rgb(230, 140, 50),
+                                            Color32::from_rgb(230, 210, 60),
+                                            Color32::from_rgb(90, 170, 80),
+                                            Color32::from_rgb(60, 140, 90),
+                                            Color32::from_rgb(70, 120, 200),
+                                            Color32::from_rgb(120, 80, 200),
+                                            Color32::from_rgb(140, 90, 50),
+                                            Color32::from_rgb(90, 60, 40),
+                                        ];
+                                        egui::Grid::new("palette_grid")
+                                            .spacing([4.0, 4.0])
+                                            .show(ui, |ui| {
+                                                for (i, &c) in PALETTE.iter().enumerate() {
+                                                    let size = egui::vec2(18.0, 18.0);
+                                                    let (rect, resp) =
+                                                        ui.allocate_exact_size(size, egui::Sense::click());
+                                                    let is_active = self.texture.brush_color == c;
+                                                    ui.painter().rect_filled(rect, CornerRadius::same(2), c);
+                                                    ui.painter().rect_stroke(
+                                                        rect,
+                                                        CornerRadius::same(2),
+                                                        Stroke::new(if is_active { 2.0 } else { 1.0 }, if is_active { Color32::from_rgb(70, 120, 200) } else { Color32::from_gray(160) }),
+                                                        egui::StrokeKind::Middle,
+                                                    );
+                                                    if resp.clicked() {
+                                                        self.texture.brush_color = c;
+                                                    }
+                                                    if (i + 1) % 6 == 0 {
+                                                        ui.end_row();
+                                                    }
+                                                }
+                                            });
                                     });
                                 });
 
@@ -1360,16 +1402,16 @@ resp.on_hover_text(format!(
                                                                      "{}\nLeft-click: load into canvas\nRight-click: delete",
                                                                      block.name
                                                                  ))
-                                                                 .context_menu(|ui| {
-                                                                     if ui.button("Load into canvas").clicked() {
-                                                                         load_idx = Some(i);
-                                                                         ui.close_menu();
-                                                                     }
-                                                                     if ui.button("Delete").clicked() {
-                                                                         delete_idx = Some(i);
-                                                                         ui.close_menu();
-                                                                     }
-                                                                 });
+                                                                     .context_menu(|ui| {
+                                                                    if ui.button("Load into canvas").clicked() {
+                                                                        load_idx = Some(i);
+                                                                        ui.close_menu();
+                                                                    }
+                                                                    if ui.button("Delete").clicked() {
+                                                                        delete_idx = Some(i);
+                                                                        ui.close_menu();
+                                                                    }
+                                                                });
                                                                 col += 1;
                                                                 if col >= 4 {
                                                                     col = 0;
@@ -1467,23 +1509,71 @@ resp.on_hover_text(format!(
                                 });
                             });
                         });
+                        });
                     }
                 }
             });
 
-        // ── 3D shape preview window ─────────────────────────────────────────
+        // Recomputed below from whichever floating windows are open this frame;
+        // used (with one frame of latency) to stop canvas painting from
+        // "leaking" through when the user is dragging inside a window on top.
+        self.blocking_window_rects.clear();
+
+        // ── Custom color picker window ───────────────────────────────────────
+        if self.show_custom_color_window {
+            let mut open = self.show_custom_color_window;
+            let mut color = self.texture.brush_color;
+
+            let color_window_resp = egui::Window::new("Custom Color")
+                .open(&mut open)
+                .resizable(false)
+                .default_size([260.0, 320.0])
+                .show(ctx, |ui| {
+                    egui::color_picker::color_picker_color32(
+                        ui,
+                        &mut color,
+                        egui::color_picker::Alpha::OnlyBlend,
+                    );
+                    ui.add_space(10.0);
+                    ui.separator();
+                    ui.add_space(6.0);
+                    ui.horizontal(|ui| {
+                        ui.label("Hex:");
+                        let mut hex = format!("#{:02X}{:02X}{:02X}", color.r(), color.g(), color.b());
+                        let resp = ui.add(
+                            egui::TextEdit::singleline(&mut hex).desired_width(90.0),
+                        );
+                        if resp.lost_focus() {
+                            if let Some((r, g, b)) = parse_hex_color(&hex) {
+                                color = Color32::from_rgba_unmultiplied(r, g, b, color.a());
+                            }
+                        }
+                    });
+                });
+
+            if let Some(inner) = &color_window_resp {
+                self.blocking_window_rects.push(inner.response.rect);
+            }
+            self.show_custom_color_window = open;
+            self.texture.brush_color = color;
+        }
+
+        // ── 3D shape preview window (drag to rotate) ────────────────────────
         if self.show_preview_window {
             let mut still_open = self.show_preview_window;
             let tex_id = self.texture.texture.as_ref().map(|t| t.id());
             let mut shape = self.preview_shape;
+            let mut yaw = self.preview_yaw;
+            let mut pitch = self.preview_pitch;
 
-            egui::Window::new("3D Preview")
+            let preview_window_resp = egui::Window::new("3D Preview")
                 .open(&mut still_open)
-                .resizable(false)
-                .default_size([260.0, 320.0])
+                .resizable(true)
+                .default_size([420.0, 500.0])
+                .min_size([320.0, 400.0])
                 .show(ctx, |ui| {
                     ui.horizontal(|ui| {
-                        for s in [PreviewShape::Cube, PreviewShape::Cross, PreviewShape::Torch] {
+                        for s in [PreviewShape::Wall, PreviewShape::Cube, PreviewShape::Cross, PreviewShape::Torch] {
                             let active = shape == s;
                             let fill = if active { C_BLUE.gamma_multiply(0.25) } else { C_SURFACE0 };
                             let txt = if active { C_BLUE } else { C_SUBTEXT };
@@ -1494,33 +1584,68 @@ resp.on_hover_text(format!(
                     });
                     ui.add_space(8.0);
 
-                    let (rect, _resp) =
-                        ui.allocate_exact_size(egui::vec2(240.0, 240.0), egui::Sense::hover());
+                    // Preview canvas fills whatever space the (resizable) window gives it.
+                    let avail = ui.available_size();
+                    let side = (avail.x.min(avail.y - 30.0)).max(200.0);
+                    let (rect, resp) = ui.allocate_exact_size(
+                        egui::vec2(side, side),
+                        egui::Sense::click_and_drag(),
+                    );
                     let painter = ui.painter();
-                    painter.rect_filled(rect, CornerRadius::same(6), Color32::from_gray(235));
+                    painter.rect_filled(rect, CornerRadius::same(6), Color32::BLACK);
                     painter.rect_stroke(
                         rect,
                         CornerRadius::same(6),
-                        Stroke::new(1.0, Color32::from_gray(200)),
+                        Stroke::new(1.0, Color32::from_gray(70)),
                         egui::StrokeKind::Middle,
                     );
 
+                    let is_wall = shape == PreviewShape::Wall;
+
+                    // Drag to orbit (not applicable to the flat wall view)
+                    if !is_wall && resp.dragged() {
+                        let d = resp.drag_delta();
+                        yaw -= d.x * 0.012;
+                        pitch = (pitch - d.y * 0.012).clamp(-1.35, 1.35);
+                    }
+                    // Slow auto-spin when idle, so it visibly reads as 3D even before touching it
+                    if !is_wall && !resp.dragged() && !resp.hovered() {
+                        yaw += ctx.input(|i| i.stable_dt) * 0.25;
+                    }
+
+                    let center = rect.center();
+                    let scale = side * 0.32; // world-space half-extent 1.0 maps to ~32% of the box
                     if let Some(tid) = tex_id {
                         match shape {
-                            PreviewShape::Cube => {
-                                draw_iso_cube(
-                                    painter,
-                                    tid,
-                                    rect.center() + egui::vec2(0.0, 20.0),
-                                    70.0,
-                                    85.0,
+                            PreviewShape::Wall => {
+                                // Straight-on, undistorted view of the texture — exactly
+                                // the pixels on the canvas, no rotation or shading, like
+                                // looking directly at one flat wall / the X-Y plane.
+                                let img_side = side * 0.82;
+                                let img_rect = egui::Rect::from_center_size(center, egui::vec2(img_side, img_side));
+                                egui::Image::new((tid, img_rect.size()))
+                                    .paint_at(ui, img_rect);
+                                painter.rect_stroke(
+                                    img_rect,
+                                    CornerRadius::same(0),
+                                    Stroke::new(1.5, Color32::from_gray(90)),
+                                    egui::StrokeKind::Middle,
                                 );
                             }
+                            PreviewShape::Cube => {
+                                draw_cube3d(painter, tid, center, scale, (1.0, 1.0, 1.0), yaw, pitch, true, Color32::WHITE);
+                            }
                             PreviewShape::Cross => {
-                                draw_cross(painter, tid, rect.center(), 65.0, 150.0);
+                                draw_cross3d(painter, tid, center, scale, yaw, pitch);
                             }
                             PreviewShape::Torch => {
-                                draw_torch(painter, tid, rect.center() + egui::vec2(0.0, 30.0), 130.0);
+                                // A single tall block wearing the actual canvas texture —
+                                // no separate floating "head" cube, just the torch's own
+                                // pixel art wrapped around one elongated shape.
+                                draw_cube3d(
+                                    painter, tid, center, scale,
+                                    (0.28, 1.0, 0.28), yaw, pitch, true, Color32::WHITE,
+                                );
                             }
                         }
                     } else {
@@ -1529,25 +1654,87 @@ resp.on_hover_text(format!(
                             egui::Align2::CENTER_CENTER,
                             "Paint or load a texture first",
                             egui::FontId::proportional(12.0),
-                            Color32::from_gray(120),
+                            Color32::from_gray(180),
                         );
                     }
 
                     ui.add_space(6.0);
-                    ui.label(
-                        egui::RichText::new("Preview uses the texture currently on the canvas.")
-                            .size(10.5)
-                            .color(C_SUBTEXT),
-                    );
+                    let hint = if is_wall {
+                        "Flat, undistorted view of the texture (the X-Y plane / one wall)."
+                    } else {
+                        "Drag inside the box to rotate. Uses the texture on the canvas."
+                    };
+                    ui.label(egui::RichText::new(hint).size(10.5).color(C_SUBTEXT));
                 });
 
+            if let Some(inner) = &preview_window_resp {
+                self.blocking_window_rects.push(inner.response.rect);
+            }
             self.show_preview_window = still_open;
             self.preview_shape = shape;
+            self.preview_yaw = yaw;
+            self.preview_pitch = pitch;
+            if still_open {
+                ctx.request_repaint(); // keep the idle auto-spin / drag animating smoothly
+            }
         }
     }
 }
 
-// ── 3D-ish isometric shape rendering (SVG-free, pure egui meshes) ───────────
+// ── Real rotatable 3D rendering (orthographic projection + backface culling) ─
+
+/// Parses "#RRGGBB", "RRGGBB", "#RGB", or "RGB" into (r, g, b). Returns None
+/// for anything else so a bad hex string just leaves the color unchanged.
+fn parse_hex_color(s: &str) -> Option<(u8, u8, u8)> {
+    let s = s.trim().trim_start_matches('#');
+    match s.len() {
+        6 => {
+            let r = u8::from_str_radix(&s[0..2], 16).ok()?;
+            let g = u8::from_str_radix(&s[2..4], 16).ok()?;
+            let b = u8::from_str_radix(&s[4..6], 16).ok()?;
+            Some((r, g, b))
+        }
+        3 => {
+            let r = u8::from_str_radix(&s[0..1].repeat(2), 16).ok()?;
+            let g = u8::from_str_radix(&s[1..2].repeat(2), 16).ok()?;
+            let b = u8::from_str_radix(&s[2..3].repeat(2), 16).ok()?;
+            Some((r, g, b))
+        }
+        _ => None,
+    }
+}
+
+#[derive(Clone, Copy)]
+struct Vec3 {
+    x: f32,
+    y: f32,
+    z: f32,
+}
+
+impl Vec3 {
+    const fn new(x: f32, y: f32, z: f32) -> Self {
+        Self { x, y, z }
+    }
+}
+
+/// Rotate a point/normal by yaw (around Y) then pitch (around X).
+fn rotate_yaw_pitch(v: Vec3, yaw: f32, pitch: f32) -> Vec3 {
+    let (sy, cy) = yaw.sin_cos();
+    let x1 = v.x * cy + v.z * sy;
+    let z1 = -v.x * sy + v.z * cy;
+    let y1 = v.y;
+
+    let (sp, cp) = pitch.sin_cos();
+    let y2 = y1 * cp - z1 * sp;
+    let z2 = y1 * sp + z1 * cp;
+    Vec3::new(x1, y2, z2)
+}
+
+/// Simple orthographic projection: X/Y become screen offsets, Z is dropped
+/// (already used for depth/culling before this point).
+fn project(v: Vec3, center: egui::Pos2, scale: f32) -> egui::Pos2 {
+    egui::pos2(center.x + v.x * scale, center.y - v.y * scale)
+}
 
 fn textured_quad(
     painter: &egui::Painter,
@@ -1568,102 +1755,122 @@ fn textured_quad(
     painter.add(egui::Shape::mesh(mesh));
 }
 
-/// Draws a Minecraft-style isometric block: a bright top face and two
-/// shaded side faces, all textured with the same block texture.
-fn draw_iso_cube(
+fn solid_quad(painter: &egui::Painter, pts: [egui::Pos2; 4], color: Color32) {
+    painter.add(egui::Shape::convex_polygon(pts.to_vec(), color, Stroke::NONE));
+}
+
+/// Draws a real 3D box (any aspect ratio) that can be rotated with yaw/pitch,
+/// using proper backface culling so exactly the camera-facing faces are drawn
+/// and they never overlap incorrectly. If `textured` is false, `base_color`
+/// is used as a flat-shaded fill instead of sampling the block texture.
+fn draw_cube3d(
     painter: &egui::Painter,
     tex_id: egui::TextureId,
-    center: egui::Pos2,
-    half_w: f32,
-    height: f32,
+    screen_center: egui::Pos2,
+    scale: f32,
+    half: (f32, f32, f32),
+    yaw: f32,
+    pitch: f32,
+    textured: bool,
+    base_color: Color32,
 ) {
-    let top = egui::pos2(center.x, center.y - half_w);
-    let right = egui::pos2(center.x + half_w, center.y - half_w * 0.5);
-    let mid = egui::pos2(center.x, center.y);
-    let left = egui::pos2(center.x - half_w, center.y - half_w * 0.5);
+    let (hx, hy, hz) = half;
+    let corners_local = [
+        Vec3::new(-hx, -hy, -hz), // 0
+        Vec3::new(hx, -hy, -hz),  // 1
+        Vec3::new(hx, hy, -hz),   // 2
+        Vec3::new(-hx, hy, -hz),  // 3
+        Vec3::new(-hx, -hy, hz),  // 4
+        Vec3::new(hx, -hy, hz),   // 5
+        Vec3::new(hx, hy, hz),    // 6
+        Vec3::new(-hx, hy, hz),   // 7
+    ];
+    let rotated: Vec<Vec3> = corners_local
+        .iter()
+        .map(|c| rotate_yaw_pitch(*c, yaw, pitch))
+        .collect();
+    let screen: Vec<egui::Pos2> = rotated.iter().map(|v| project(*v, screen_center, scale)).collect();
 
     let uv00 = egui::pos2(0.0, 0.0);
     let uv10 = egui::pos2(1.0, 0.0);
     let uv11 = egui::pos2(1.0, 1.0);
     let uv01 = egui::pos2(0.0, 1.0);
+    let uvs = [uv00, uv10, uv11, uv01];
 
-    // Top face (full brightness)
-    textured_quad(painter, tex_id, [left, top, right, mid], [uv01, uv00, uv10, uv11], Color32::WHITE);
+    // (corner indices in perimeter order, local outward normal)
+    let faces: [([usize; 4], Vec3); 6] = [
+        ([3, 2, 6, 7], Vec3::new(0.0, 1.0, 0.0)),  // top
+        ([0, 1, 5, 4], Vec3::new(0.0, -1.0, 0.0)), // bottom
+        ([4, 5, 6, 7], Vec3::new(0.0, 0.0, 1.0)),  // front
+        ([1, 0, 3, 2], Vec3::new(0.0, 0.0, -1.0)), // back
+        ([5, 1, 2, 6], Vec3::new(1.0, 0.0, 0.0)),  // right
+        ([0, 4, 7, 3], Vec3::new(-1.0, 0.0, 0.0)), // left
+    ];
 
-    // Left face (medium shade)
-    let left_bot = egui::pos2(left.x, left.y + height);
-    let mid_bot = egui::pos2(mid.x, mid.y + height);
-    textured_quad(
-        painter,
-        tex_id,
-        [left, mid, mid_bot, left_bot],
-        [uv00, uv10, uv11, uv01],
-        Color32::from_gray(160),
-    );
+    let light = Vec3::new(0.35, 0.8, 0.5);
+    let light_len = (light.x * light.x + light.y * light.y + light.z * light.z).sqrt();
 
-    // Right face (darkest shade)
-    let right_bot = egui::pos2(right.x, right.y + height);
-    textured_quad(
-        painter,
-        tex_id,
-        [mid, right, right_bot, mid_bot],
-        [uv00, uv10, uv11, uv01],
-        Color32::from_gray(120),
-    );
+    for (idx, normal) in faces.iter() {
+        let rn = rotate_yaw_pitch(*normal, yaw, pitch);
+        if rn.z <= 0.02 {
+            continue; // back-facing, camera looks toward -Z
+        }
+        let dot = ((rn.x * light.x + rn.y * light.y + rn.z * light.z) / light_len).max(0.0);
+        let brightness = 0.5 + 0.5 * dot;
+
+        let pts = [screen[idx[0]], screen[idx[1]], screen[idx[2]], screen[idx[3]]];
+        if textured {
+            let tint = Color32::from_gray((brightness * 255.0).clamp(0.0, 255.0) as u8);
+            textured_quad(painter, tex_id, pts, uvs, tint);
+        } else {
+            solid_quad(painter, pts, base_color.gamma_multiply(brightness));
+        }
+    }
 }
 
-/// Draws a Minecraft-plant-style crossed pair of textured planes (an "X"
-/// silhouette when viewed from the front).
-fn draw_cross(painter: &egui::Painter, tex_id: egui::TextureId, center: egui::Pos2, half_w: f32, height: f32) {
+/// Draws a Minecraft-plant-style crossed pair of textured planes that
+/// genuinely sit in 3D and rotate with the camera.
+fn draw_cross3d(painter: &egui::Painter, tex_id: egui::TextureId, screen_center: egui::Pos2, scale: f32, yaw: f32, pitch: f32) {
+    let hw = 0.7;
+    let hy = 0.9;
     let uv00 = egui::pos2(0.0, 0.0);
     let uv10 = egui::pos2(1.0, 0.0);
     let uv11 = egui::pos2(1.0, 1.0);
     let uv01 = egui::pos2(0.0, 1.0);
-    let shear = half_w * 0.8;
+    let uvs = [uv00, uv10, uv11, uv01];
 
-    let bl = egui::pos2(center.x - half_w, center.y + height * 0.5);
-    let br = egui::pos2(center.x + half_w, center.y + height * 0.5);
+    let plane_a_local = [
+        Vec3::new(-hw, -hy, -hw),
+        Vec3::new(hw, -hy, hw),
+        Vec3::new(hw, hy, hw),
+        Vec3::new(-hw, hy, -hw),
+    ];
+    let plane_b_local = [
+        Vec3::new(-hw, -hy, hw),
+        Vec3::new(hw, -hy, -hw),
+        Vec3::new(hw, hy, -hw),
+        Vec3::new(-hw, hy, hw),
+    ];
 
-    // Plane leaning right-to-left going up
-    let tr1 = egui::pos2(center.x + half_w - shear, center.y - height * 0.5);
-    let tl1 = egui::pos2(center.x - half_w - shear, center.y - height * 0.5);
-    textured_quad(painter, tex_id, [tl1, tr1, br, bl], [uv00, uv10, uv11, uv01], Color32::WHITE);
+    let mut planes = [plane_a_local, plane_b_local];
+    // Depth-sort so the farther plane is painted first (basic painter's algorithm).
+    let avg_z = |p: &[Vec3; 4]| -> f32 {
+        p.iter().map(|c| rotate_yaw_pitch(*c, yaw, pitch).z).sum::<f32>() / 4.0
+    };
+    planes.sort_by(|a, b| avg_z(a).partial_cmp(&avg_z(b)).unwrap());
 
-    // Plane leaning left-to-right going up
-    let tr2 = egui::pos2(center.x + half_w + shear, center.y - height * 0.5);
-    let tl2 = egui::pos2(center.x - half_w + shear, center.y - height * 0.5);
-    textured_quad(
-        painter,
-        tex_id,
-        [tl2, tr2, br, bl],
-        [uv00, uv10, uv11, uv01],
-        Color32::from_gray(235),
-    );
-}
-
-/// Draws a small Minecraft-torch-style shape: a plain stick with a small
-/// textured cube "head" on top (stand-in for the flame/lit tip).
-fn draw_torch(painter: &egui::Painter, tex_id: egui::TextureId, center: egui::Pos2, scale: f32) {
-    let stick_w = scale * 0.16;
-    let stick_h = scale * 0.9;
-    let stick_top_y = center.y - scale * 0.1;
-    let stick_rect = egui::Rect::from_min_size(
-        egui::pos2(center.x - stick_w * 0.5, stick_top_y),
-        egui::vec2(stick_w, stick_h),
-    );
-    painter.rect_filled(stick_rect, CornerRadius::same(1), Color32::from_rgb(120, 85, 45));
-    painter.rect_stroke(
-        stick_rect,
-        CornerRadius::same(1),
-        Stroke::new(1.0, Color32::from_rgb(70, 45, 20)),
-        egui::StrokeKind::Middle,
-    );
-
-    let head_center = egui::pos2(center.x, stick_top_y - scale * 0.02);
-    draw_iso_cube(painter, tex_id, head_center, scale * 0.3, scale * 0.3);
+    for local in planes.iter() {
+        let screen: Vec<egui::Pos2> = local
+            .iter()
+            .map(|c| project(rotate_yaw_pitch(*c, yaw, pitch), screen_center, scale))
+            .collect();
+        let pts = [screen[0], screen[1], screen[2], screen[3]];
+        textured_quad(painter, tex_id, pts, uvs, Color32::WHITE);
+    }
 }
 
 // ── Grid rendering ──────────────────────────────────────────────────────────
+
 
 impl AtlasApp {
     fn show_grid(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
@@ -1812,12 +2019,12 @@ fn show_texture_canvas(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         let display_w = max_w.max(tex_sz.x * 8.0);
         let display_h = display_w / (tex_sz.x / tex_sz.y);
 
-        let canvas_bg = Color32::from_rgb(240, 240, 240);
+        let canvas_bg = Color32::BLACK;
         egui::Frame {
             fill: canvas_bg,
             inner_margin: egui::Margin::symmetric(2, 2),
             corner_radius: CornerRadius::same(0),
-            stroke: Stroke::new(1.0, Color32::BLACK),
+            stroke: Stroke::new(1.0, Color32::from_gray(90)),
             ..Default::default()
         }
         .show(ui, |ui| {
@@ -1830,13 +2037,13 @@ fn show_texture_canvas(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
             if let Some(tex_id) = tex_id {
                 let image_response = ui.add(
                     egui::Image::new((tex_id, egui::vec2(display_w, display_h)))
-                ).interact(egui::Sense::click());
+                );
 
                 if self.texture.show_grid && display_w / tex_sz.x > 4.0 {
                     let painter = ui.painter();
                     let cell_w = display_w / tex_sz.x;
                     let cell_h = display_h / tex_sz.y;
-                    let grid_stroke = Stroke::new(1.0, Color32::from_gray(60));
+                    let grid_stroke = Stroke::new(1.0, Color32::from_gray(80));
 
                     for i in 0..=(tex_sz.x as i32) {
                         let x = image_response.rect.left() + i as f32 * cell_w;
@@ -1882,11 +2089,23 @@ fn show_texture_canvas(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
                     self.texture.last_pixel = None;
                 }
 
+                // If the pointer is over the 3D Preview / Custom Color window
+                // (floating on top of the canvas), treat it as "not on the
+                // canvas" entirely — dragging to rotate the preview must never
+                // paint pixels on the texture underneath it.
+                let pointer_over_other_window = pointer_pos
+                    .map(|pos| self.blocking_window_rects.iter().any(|r| r.contains(pos)))
+                    .unwrap_or(false);
+                let pointer_pos = if pointer_over_other_window { None } else { pointer_pos };
+                if pointer_over_other_window {
+                    self.texture.cursor_pixel = None;
+                }
+
                 if let Some(pos) = pointer_pos {
                     let rel = pos - image_response.rect.left_top();
                     let scale = display_w / tex_sz.x;
-                    let img_x = (rel.x / scale).round() as u32;
-                    let img_y = (rel.y / scale).round() as u32;
+                    let img_x = (rel.x / scale).floor().max(0.0) as u32;
+                    let img_y = (rel.y / scale).floor().max(0.0) as u32;
                     let in_bounds = img_x < self.texture.canvas.width() && img_y < self.texture.canvas.height();
 
                     if in_bounds {
@@ -1930,16 +2149,21 @@ fn show_texture_canvas(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
                         let painter = ui.painter();
                         match self.texture.tool {
                             Tool::Brush | Tool::Eraser => {
-                                let brush_r = (self.texture.brush_size * scale).max(1.0);
                                 let cursor_color = match self.texture.tool {
                                     Tool::Brush => C_BLUE.gamma_multiply(0.9),
                                     Tool::Eraser => C_RED.gamma_multiply(0.9),
                                     _ => unreachable!(),
                                 };
-                                painter.circle_stroke(
-                                    pos,
-                                    brush_r,
+                                let cell_rect = egui::Rect::from_min_size(
+                                    image_response.rect.left_top()
+                                        + egui::vec2(img_x as f32 * scale, img_y as f32 * scale),
+                                    egui::vec2(scale, scale),
+                                );
+                                painter.rect_stroke(
+                                    cell_rect,
+                                    CornerRadius::same(0),
                                     Stroke::new(1.8, cursor_color),
+                                    egui::StrokeKind::Middle,
                                 );
                             }
                             Tool::Fill => {
