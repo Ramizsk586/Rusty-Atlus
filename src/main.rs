@@ -20,7 +20,6 @@ const C_TEAL: Color32 = Color32::from_rgb(148, 226, 213);
 
 const TARGET_CELL_PX: f32 = 40.0; // used for window sizing only
 const GRID_SPACING: f32 = 1.0;
-const CELL_ROUND: u8 = 3;
 
 // ── Data types ──────────────────────────────────────────────────────────────
 
@@ -1949,7 +1948,6 @@ impl AtlasApp {
         let spacing_total = (gs as f32 - 1.0) * GRID_SPACING;
         let cell_sz = ((avail_w - spacing_total) / gs as f32).max(4.0);
         let size = egui::vec2(cell_sz, cell_sz);
-        let plus_font = (cell_sz * 0.45).clamp(8.0, 20.0);
 
         egui::Grid::new("atlas_grid")
             .spacing([GRID_SPACING, GRID_SPACING])
@@ -2066,62 +2064,34 @@ fn show_texture_canvas(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         self.texture.ensure_checker(ctx);
 
         let tex_id = self.texture.texture.as_ref().map(|t| t.id());
-        let sz = self.texture.canvas_size_setting;
-
-        if tex_id.is_some() {
-            ui.label(
-                egui::RichText::new(format!("{} × {} Pixel Art", sz, sz))
-                    .size(13.0)
-                    .color(C_SUBTEXT),
-            );
-            ui.add_space(6.0);
-        }
 
         let tex_sz = self.texture.canvas_size();
+        // Compact: 16px canvas displayed at 48px total (3px per pixel, 12px at zoom 4)
+        let display_w = 48.0 * self.texture.zoom;
+        let display_h = display_w;
+
+        // Center the canvas horizontally
         let avail = ui.available_size();
-        let target_dim = 512.0 * self.texture.zoom;
-        let max_w = avail.x.min(target_dim).min(tex_sz.x * 32.0 * self.texture.zoom);
-        let display_w = max_w.max(tex_sz.x * 8.0);
-        let display_h = display_w / (tex_sz.x / tex_sz.y);
-
-        let canvas_bg = Color32::from_rgb(12, 12, 16);
-        egui::Frame {
-            fill: canvas_bg,
-            inner_margin: egui::Margin::symmetric(3, 3),
-            corner_radius: CornerRadius::same(6),
-            stroke: Stroke::new(1.5, Color32::from_rgb(48, 48, 60)),
-            ..Default::default()
+        let total_w = display_w + 4.0; // 2px padding each side
+        let total_h = display_h + 4.0;
+        if avail.x > total_w {
+            ui.add_space((avail.x - total_w) * 0.5);
         }
-        .show(ui, |ui| {
-            let canvas_rect = egui::Rect::from_min_size(ui.cursor().left_top(), egui::vec2(display_w, display_h));
 
-            // Draw a subtle inner shadow / border around the canvas area
-            let canvas_painter = ui.painter();
-            canvas_painter.rect_filled(canvas_rect, CornerRadius::same(3), Color32::from_rgb(8, 8, 12));
+        // Allocate fixed-size space for the canvas + border
+        let (outer_rect, _) = ui.allocate_exact_size(egui::vec2(total_w, total_h), egui::Sense::hover());
+        let painter = ui.painter();
 
-            // Checkered transparency background
-            if let Some(chk_id) = self.texture.checker_texture.as_ref().map(|t| t.id()) {
-                let uv = egui::Rect::from_min_max(
-                    egui::pos2(0.0, 0.0),
-                    egui::pos2(display_w / 12.0, display_h / 12.0),
-                );
-                let mut mesh = egui::Mesh::with_texture(chk_id);
-                mesh.add_rect_with_uv(canvas_rect, uv, Color32::WHITE);
-                canvas_painter.add(egui::Shape::mesh(mesh));
-            } else {
-                canvas_painter.rect_filled(canvas_rect, CornerRadius::same(0), Color32::from_rgb(40, 40, 50));
-            }
-            
-            // Subtle inner border
-            canvas_painter.rect_stroke(
-                canvas_rect,
-                CornerRadius::same(3),
-                Stroke::new(1.0, Color32::from_rgba_premultiplied(60, 60, 80, 60)),
-                egui::StrokeKind::Inside,
-            );
+        // Outer border frame
+        painter.rect_filled(outer_rect, CornerRadius::same(4), Color32::from_rgb(8, 8, 12));
+        painter.rect_stroke(outer_rect, CornerRadius::same(4), Stroke::new(1.0, Color32::from_gray(55)), egui::StrokeKind::Middle);
 
-            // Advance cursor past checker area so the image overlays correctly
-            let (_, _) = ui.allocate_exact_size(egui::vec2(display_w, display_h), egui::Sense::hover());
+        // Inner canvas area (2px inset)
+        let canvas_rect = outer_rect.shrink2(egui::vec2(2.0, 2.0));
+        let canvas_painter = ui.painter();
+
+        // Black background for the pixel canvas
+        canvas_painter.rect_filled(canvas_rect, CornerRadius::same(2), Color32::BLACK);
 
             if let Some(tex_id) = tex_id {
                 // Paint the actual texture on top of the checker
