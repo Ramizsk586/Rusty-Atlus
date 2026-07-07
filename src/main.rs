@@ -19,7 +19,7 @@ const C_MAUVE: Color32 = Color32::from_rgb(203, 166, 247);
 const C_TEAL: Color32 = Color32::from_rgb(148, 226, 213);
 
 const TARGET_CELL_PX: f32 = 40.0; // used for window sizing only
-const GRID_SPACING: f32 = 1.5;
+const GRID_SPACING: f32 = 1.0;
 const CELL_ROUND: u8 = 3;
 
 // ── Data types ──────────────────────────────────────────────────────────────
@@ -114,7 +114,7 @@ impl Default for TextureWorkspace {
             brush_color: Color32::from_rgb(205, 214, 244),
             tool: Tool::Brush,
             canvas_size_setting: 16,
-            zoom: 1.0,
+            zoom: 4.0,
             show_grid: true,
             mirror_x: false,
             mirror_y: false,
@@ -144,13 +144,13 @@ impl TextureWorkspace {
         if self.checker_texture.is_some() {
             return;
         }
-        let sz = 64;
+        let sz = 128;
         let mut img = RgbaImage::new(sz, sz);
-        let check = 8;
+        let check = 16;
         for y in 0..sz {
             for x in 0..sz {
                 let light = ((x / check) + (y / check)) % 2 == 0;
-                let v = if light { 45 } else { 35 };
+                let v = if light { 68 } else { 42 };
                 img.put_pixel(x, y, Rgba([v, v, v, 255]));
             }
         }
@@ -294,19 +294,8 @@ let px = *self.canvas.get_pixel(x, y);
         }
     }
 
-    fn resize_canvas(&mut self, new_size: usize, ctx: &egui::Context) {
-        self.push_undo();
-        let old = self.canvas.clone();
-        self.canvas = RgbaImage::new(new_size as u32, new_size as u32);
-        // Copy overlapping region
-        let copy_w = old.width().min(new_size as u32);
-        let copy_h = old.height().min(new_size as u32);
-        for y in 0..copy_h {
-            for x in 0..copy_w {
-                *self.canvas.get_pixel_mut(x, y) = *old.get_pixel(x, y);
-            }
-        }
-        self.canvas_size_setting = new_size;
+    fn resize_canvas(&mut self, _new_size: usize, ctx: &egui::Context) {
+        // Always stays at 16×16 — this function is kept for API compatibility
         self.texture = None;
         self.ensure_texture(ctx);
     }
@@ -1466,34 +1455,6 @@ ui.painter().rect_filled(rect, CornerRadius::same(2), color);
                             ui.separator();
                             ui.add_space(10.0);
 
-                            // ── Canvas size ──────────────────────
-                            ui.label(
-                                egui::RichText::new("Canvas Size")
-                                    .size(10.0)
-                                    .color(Color32::from_gray(110))
-                                    .strong(),
-                            );
-                            ui.add_space(6.0);
-                            ui.horizontal_wrapped(|ui| {
-                                for &sz in &[8usize, 16, 32, 64] {
-                                    let is_active = self.texture.canvas_size_setting == sz;
-                                    let fill = if is_active { C_TEAL.gamma_multiply(0.25) } else { Color32::from_rgb(40, 40, 52) };
-                                    let txt  = if is_active { C_TEAL } else { Color32::from_gray(130) };
-                                    let label = format!("{}px", sz);
-                                    let btn = egui::Button::new(egui::RichText::new(&label).color(txt).size(12.0))
-                                        .fill(fill)
-                                        .corner_radius(CornerRadius::same(4));
-                                    if ui.add(btn).clicked() {
-                                        self.texture.resize_canvas(sz, ctx);
-                                        self.set_status(format!("Canvas resized to {}x{}", sz, sz), StatusKind::Success);
-                                    }
-                                }
-                            });
-
-                            ui.add_space(12.0);
-                            ui.separator();
-                            ui.add_space(10.0);
-
                             // ── File actions ─────────────────────
                             ui.label(
                                 egui::RichText::new("File")
@@ -1998,57 +1959,53 @@ impl AtlasApp {
                         let idx = row * gs + col;
                         let is_filled = self.cells[idx].texture.is_some();
 
+                        // Black background cell with light gray border
+                        let cell_border = Stroke::new(1.0, Color32::from_gray(80));
+                        let cell_fill = Color32::from_gray(12); // near-black
+
                         let response = if is_filled {
                             if let Some(tex) = &self.cells[idx].texture {
-                                let img = egui::Image::new((tex.id(), size))
-                                    .corner_radius(CornerRadius::same(CELL_ROUND));
-                                ui.add(img).interact(egui::Sense::click())
+                                // Paint dark bg first, then overlay the texture
+                                let (rect, resp) = ui.allocate_exact_size(size, egui::Sense::click());
+                                let p = ui.painter();
+                                p.rect_filled(rect, CornerRadius::same(0), cell_fill);
+                                egui::Image::new((tex.id(), size)).paint_at(ui, rect);
+                                p.rect_stroke(rect, CornerRadius::same(0), cell_border, egui::StrokeKind::Middle);
+                                resp
                             } else {
                                 ui.add_sized(size, egui::Button::new(""))
                             }
                         } else {
-                            ui.add_sized(
-                                size,
-                                egui::Button::new(
-                                    egui::RichText::new("+")
-                                        .color(C_SUBTEXT.gamma_multiply(0.35))
-                                        .size(plus_font),
-                                )
-                                .fill(C_SURFACE0.gamma_multiply(0.6)),
-                            )
+                            let (rect, resp) = ui.allocate_exact_size(size, egui::Sense::click());
+                            let p = ui.painter();
+                            p.rect_filled(rect, CornerRadius::same(0), cell_fill);
+                            p.rect_stroke(rect, CornerRadius::same(0), cell_border, egui::StrokeKind::Middle);
+                            // Draw a faint + in center
+                            let c = rect.center();
+                            let s = 4.0;
+                            let plus_clr = Color32::from_gray(55);
+                            p.line_segment([egui::pos2(c.x - s, c.y), egui::pos2(c.x + s, c.y)], Stroke::new(1.2, plus_clr));
+                            p.line_segment([egui::pos2(c.x, c.y - s), egui::pos2(c.x, c.y + s)], Stroke::new(1.2, plus_clr));
+                            resp
                         };
 
-                        // --- Hover highlight ---
+                        // --- Hover highlight --- highlighted border
                         if response.hovered() {
                             let painter = ui.painter();
                             let rect = response.rect;
-                            if is_filled {
-                                painter.rect_stroke(
-                                    rect.expand(1.0),
-                                    CornerRadius::same(CELL_ROUND.saturating_add(1)),
-                                    Stroke::new(1.8, C_BLUE.gamma_multiply(0.7)),
-                                    egui::StrokeKind::Middle,
-                                );
-                            } else {
-                                painter.rect_filled(
-                                    rect,
-                                    CornerRadius::same(CELL_ROUND),
-                                    C_SURFACE0,
-                                );
-                                painter.rect_stroke(
-                                    rect,
-                                    CornerRadius::same(CELL_ROUND),
-                                    Stroke::new(1.5, C_BLUE.gamma_multiply(0.5)),
-                                    egui::StrokeKind::Middle,
-                                );
-                            }
+                            painter.rect_stroke(
+                                rect.expand(1.0),
+                                CornerRadius::same(1),
+                                Stroke::new(1.8, C_BLUE.gamma_multiply(0.7)),
+                                egui::StrokeKind::Middle,
+                            );
                         }
 
                         if is_filled && !response.hovered() {
                             ui.painter().rect_stroke(
                                 response.rect,
-                                CornerRadius::same(CELL_ROUND),
-                                Stroke::new(0.8, C_SURFACE1),
+                                CornerRadius::same(0),
+                                Stroke::new(1.0, Color32::from_gray(90)),
                                 egui::StrokeKind::Middle,
                             );
                         }
@@ -2127,29 +2084,41 @@ fn show_texture_canvas(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         let display_w = max_w.max(tex_sz.x * 8.0);
         let display_h = display_w / (tex_sz.x / tex_sz.y);
 
-        let canvas_bg = Color32::from_rgb(22, 22, 28);
+        let canvas_bg = Color32::from_rgb(12, 12, 16);
         egui::Frame {
             fill: canvas_bg,
-            inner_margin: egui::Margin::symmetric(2, 2),
-            corner_radius: CornerRadius::same(4),
-            stroke: Stroke::new(1.5, Color32::from_rgb(55, 55, 70)),
+            inner_margin: egui::Margin::symmetric(3, 3),
+            corner_radius: CornerRadius::same(6),
+            stroke: Stroke::new(1.5, Color32::from_rgb(48, 48, 60)),
             ..Default::default()
         }
         .show(ui, |ui| {
             let canvas_rect = egui::Rect::from_min_size(ui.cursor().left_top(), egui::vec2(display_w, display_h));
 
+            // Draw a subtle inner shadow / border around the canvas area
+            let canvas_painter = ui.painter();
+            canvas_painter.rect_filled(canvas_rect, CornerRadius::same(3), Color32::from_rgb(8, 8, 12));
+
             // Checkered transparency background
             if let Some(chk_id) = self.texture.checker_texture.as_ref().map(|t| t.id()) {
                 let uv = egui::Rect::from_min_max(
                     egui::pos2(0.0, 0.0),
-                    egui::pos2(display_w / 16.0, display_h / 16.0),
+                    egui::pos2(display_w / 12.0, display_h / 12.0),
                 );
                 let mut mesh = egui::Mesh::with_texture(chk_id);
                 mesh.add_rect_with_uv(canvas_rect, uv, Color32::WHITE);
-                ui.painter().add(egui::Shape::mesh(mesh));
+                canvas_painter.add(egui::Shape::mesh(mesh));
             } else {
-                ui.painter().rect_filled(canvas_rect, CornerRadius::same(0), Color32::from_rgb(40, 40, 50));
+                canvas_painter.rect_filled(canvas_rect, CornerRadius::same(0), Color32::from_rgb(40, 40, 50));
             }
+            
+            // Subtle inner border
+            canvas_painter.rect_stroke(
+                canvas_rect,
+                CornerRadius::same(3),
+                Stroke::new(1.0, Color32::from_rgba_premultiplied(60, 60, 80, 60)),
+                egui::StrokeKind::Inside,
+            );
 
             // Advance cursor past checker area so the image overlays correctly
             let (_, _) = ui.allocate_exact_size(egui::vec2(display_w, display_h), egui::Sense::hover());
