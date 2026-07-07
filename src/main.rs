@@ -100,6 +100,7 @@ struct TextureWorkspace {
     cursor_pixel: Option<(u32, u32)>,
     // Last painted pixel (for drag interpolation)
     last_pixel: Option<(u32, u32)>,
+    path_input: String,
 }
 
 const MAX_UNDO: usize = 50;
@@ -121,6 +122,7 @@ impl Default for TextureWorkspace {
             redo_stack: Vec::new(),
             cursor_pixel: None,
             last_pixel: None,
+            path_input: String::new(),
         }
     }
 }
@@ -940,215 +942,134 @@ impl eframe::App for AtlasApp {
 
                 ui.add_space(6.0);
 
-                // Separator line
-                ui.painter().rect_filled(
-                    egui::Rect::from_min_size(
-                        ui.cursor().left_top(),
-                        egui::vec2(ui.available_width(), 1.0),
-                    ),
-                    0.0,
-                    C_SURFACE0,
-                );
-                ui.add_space(6.0);
+                if self.mode == AppMode::Atlas {
+                    // Separator line
+                    ui.painter().rect_filled(
+                        egui::Rect::from_min_size(
+                            ui.cursor().left_top(),
+                            egui::vec2(ui.available_width(), 1.0),
+                        ),
+                        0.0,
+                        C_SURFACE0,
+                    );
+                    ui.add_space(6.0);
 
-                // -- Row 2 : settings --
-                ui.horizontal(|ui| {
-                    match self.mode {
-                        AppMode::Atlas => {
-ui.label(
-                                egui::RichText::new("Grid").small().color(C_SUBTEXT),
+                    // -- Row 2 : settings --
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            egui::RichText::new("Grid").small().color(C_SUBTEXT),
+                        );
+                        let gs_before = self.grid_size;
+                        ui.add(
+                            egui::DragValue::new(&mut self.grid_size)
+                                .range(10..=64)
+                                .speed(0.5)
+                                .suffix(" x"),
+                        );
+                        if self.grid_size != gs_before {
+                            self.resize_grid(self.grid_size);
+                        }
+
+                        ui.add_space(16.0);
+
+                        // Cell pixel size
+                        ui.label(
+                            egui::RichText::new("Tile px").small().color(C_SUBTEXT),
+                        );
+                        ui.add(
+                            egui::DragValue::new(&mut self.cell_size)
+                                .range(8..=512)
+                                .speed(4),
+                        );
+
+                        // Tile count badge
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            let filled = filled_count(&self.cells);
+                            let total = self.grid_size * self.grid_size;
+
+                            let label = format!("{filled} / {total}");
+                            let font = egui::FontId::proportional(12.0);
+                            let text_w = ui.fonts(|f| f.layout_no_wrap(
+                                label.clone(),
+                                font.clone(),
+                                C_TEXT,
+                            ).size().x);
+
+                            let badge_w = text_w + 22.0;
+                            let badge_h = 22.0;
+
+                            let (rect, _resp) = ui.allocate_exact_size(
+                                egui::vec2(badge_w, badge_h),
+                                egui::Sense::hover(),
                             );
-                            let gs_before = self.grid_size;
-                         ui.add(
-                             egui::DragValue::new(&mut self.grid_size)
-                                 .range(10..=64)
-                                 .speed(0.5)
-                                 .suffix(" x"),
-                         );
-                            if self.grid_size != gs_before {
-                                self.resize_grid(self.grid_size);
+
+                            let painter = ui.painter();
+                            painter.rect_filled(
+                                rect,
+                                CornerRadius::same((badge_h * 0.5) as u8),
+                                C_SURFACE0,
+                            );
+
+                            if filled > 0 && total > 0 {
+                                let frac = filled as f32 / total as f32;
+                                let fill_w = (rect.width() - 4.0) * frac;
+                                let fill_rect = egui::Rect::from_min_size(
+                                    egui::pos2(rect.min.x + 2.0, rect.min.y + 2.0),
+                                    egui::vec2(fill_w, rect.height() - 4.0),
+                                );
+                                painter.rect_filled(
+                                    fill_rect,
+                                    CornerRadius::same(((badge_h - 4.0) * 0.5) as u8),
+                                    C_BLUE.gamma_multiply(0.25),
+                                );
                             }
 
-                            ui.add_space(16.0);
+                            let filled_str = filled.to_string();
+                            let filled_w = ui.fonts(|f| f.layout_no_wrap(
+                                filled_str.clone(),
+                                font.clone(),
+                                C_BLUE,
+                            ).size().x);
 
-                            // Cell pixel size
-                            ui.label(
-                                egui::RichText::new("Tile px").small().color(C_SUBTEXT),
+                            let separator_w = ui.fonts(|f| f.layout_no_wrap(
+                                " / ".to_string(),
+                                font.clone(),
+                                C_SUBTEXT,
+                            ).size().x);
+
+                            let mut x = rect.center().x - (text_w * 0.5);
+                            let y = rect.center().y;
+
+                            painter.text(
+                                egui::pos2(x + filled_w * 0.5, y),
+                                egui::Align2::CENTER_CENTER,
+                                &filled_str,
+                                font.clone(),
+                                C_BLUE,
                             );
-                            ui.add(
-                                egui::DragValue::new(&mut self.cell_size)
-                                    .range(8..=512)
-                                    .speed(4),
+                            x += filled_w;
+
+                            painter.text(
+                                egui::pos2(x + separator_w * 0.5, y),
+                                egui::Align2::CENTER_CENTER,
+                                " / ",
+                                font.clone(),
+                                C_SUBTEXT,
                             );
+                            x += separator_w;
 
-                            // Tile count badge
-                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                let filled = filled_count(&self.cells);
-                                let total = self.grid_size * self.grid_size;
-
-                                let label = format!("{filled} / {total}");
-                                let font = egui::FontId::proportional(12.0);
-                                let text_w = ui.fonts(|f| f.layout_no_wrap(
-                                    label.clone(),
-                                    font.clone(),
-                                    C_TEXT,
-                                 ).size().x);
-
-                                let badge_w = text_w + 22.0;
-                                let badge_h = 22.0;
-
-                                let (rect, _resp) = ui.allocate_exact_size(
-                                    egui::vec2(badge_w, badge_h),
-                                    egui::Sense::hover(),
-                                );
-
-                                let painter = ui.painter();
-                                painter.rect_filled(
-                                    rect,
-                                    CornerRadius::same((badge_h * 0.5) as u8),
-                                    C_SURFACE0,
-                                );
-
-                                if filled > 0 && total > 0 {
-                                    let frac = filled as f32 / total as f32;
-                                    let fill_w = (rect.width() - 4.0) * frac;
-                                    let fill_rect = egui::Rect::from_min_size(
-                                        egui::pos2(rect.min.x + 2.0, rect.min.y + 2.0),
-                                        egui::vec2(fill_w, rect.height() - 4.0),
-                                    );
-                                    painter.rect_filled(
-                                        fill_rect,
-                                        CornerRadius::same(((badge_h - 4.0) * 0.5) as u8),
-                                        C_BLUE.gamma_multiply(0.25),
-                                    );
-                                }
-
-                                let filled_str = filled.to_string();
-                                let filled_w = ui.fonts(|f| f.layout_no_wrap(
-                                    filled_str.clone(),
-                                    font.clone(),
-                                    C_BLUE,
-                                 ).size().x);
-
-                                let separator_w = ui.fonts(|f| f.layout_no_wrap(
-                                    " / ".to_string(),
-                                    font.clone(),
-                                    C_SUBTEXT,
-                                 ).size().x);
-
-                                let mut x = rect.center().x - (text_w * 0.5);
-                                let y = rect.center().y;
-
-                                painter.text(
-                                    egui::pos2(x + filled_w * 0.5, y),
-                                    egui::Align2::CENTER_CENTER,
-                                    &filled_str,
-                                    font.clone(),
-                                    C_BLUE,
-                                );
-                                x += filled_w;
-
-                                painter.text(
-                                    egui::pos2(x + separator_w * 0.5, y),
-                                    egui::Align2::CENTER_CENTER,
-                                    " / ",
-                                    font.clone(),
-                                    C_SUBTEXT,
-                                );
-                                x += separator_w;
-
-                                let total_str = total.to_string();
-                                painter.text(
-                                    egui::pos2(x + text_w - filled_w - separator_w * 0.5, y),
-                                    egui::Align2::CENTER_CENTER,
-                                    &total_str,
-                                    font.clone(),
-                                    C_SUBTEXT,
-                                );
-                            });
-                        }
-                        AppMode::TextureCreator => {
-                            // Quick info bar for texture mode
-                            ui.label(
-                                egui::RichText::new("Pixel Art Studio")
-                                    .size(12.0)
-                                    .color(C_SUBTEXT),
+                            let total_str = total.to_string();
+                            painter.text(
+                                egui::pos2(x + text_w - filled_w - separator_w * 0.5, y),
+                                egui::Align2::CENTER_CENTER,
+                                &total_str,
+                                font.clone(),
+                                C_SUBTEXT,
                             );
-                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                // Zoom controls
-                                ui.label(
-                                    egui::RichText::new(format!("{:.0}%", self.texture.zoom * 100.0))
-                                        .size(11.0)
-                                        .color(C_SUBTEXT),
-                                );
-                                ui.add_space(4.0);
-                                if accent_button(ui, "-", C_SURFACE0, C_SUBTEXT) {
-                                    self.texture.zoom = (self.texture.zoom - 0.25).max(0.25);
-                                }
-                                if accent_button(ui, "+", C_SURFACE0, C_SUBTEXT) {
-                                    self.texture.zoom = (self.texture.zoom + 0.25).min(4.0);
-                                }
-                                ui.add_space(8.0);
-
-                                // Grid toggle
-                                let grid_txt_col = if self.texture.show_grid { C_TEAL } else { C_SUBTEXT };
-                                let grid_fill = if self.texture.show_grid { C_TEAL.gamma_multiply(0.15) } else { C_SURFACE0 };
-                                if accent_button(ui, " Grid ", grid_fill, grid_txt_col) {
-                                    self.texture.show_grid = !self.texture.show_grid;
-                                }
-                                ui.add_space(4.0);
-
-                                // Mirror toggles
-                                let mx_txt = if self.texture.mirror_x { C_MAUVE } else { C_SUBTEXT };
-                                let mx_fill = if self.texture.mirror_x { C_MAUVE.gamma_multiply(0.15) } else { C_SURFACE0 };
-                                if accent_button(ui, " \u{2194} X ", mx_fill, mx_txt) {
-                                    self.texture.mirror_x = !self.texture.mirror_x;
-                                }
-                                let my_txt = if self.texture.mirror_y { C_MAUVE } else { C_SUBTEXT };
-                                let my_fill = if self.texture.mirror_y { C_MAUVE.gamma_multiply(0.15) } else { C_SURFACE0 };
-                                if accent_button(ui, " \u{2195} Y ", my_fill, my_txt) {
-                                    self.texture.mirror_y = !self.texture.mirror_y;
-                                }
-                                ui.add_space(8.0);
-
-                                let preview_txt = if self.show_preview_window { C_TEAL } else { C_SUBTEXT };
-                                let preview_fill = if self.show_preview_window { C_TEAL.gamma_multiply(0.15) } else { C_SURFACE0 };
-                                if accent_button(ui, " \u{1f9ca} 3D Preview ", preview_fill, preview_txt) {
-                                    self.show_preview_window = !self.show_preview_window;
-                                }
-                                ui.add_space(8.0);
-
-                                // Color button — always visible here regardless of
-                                // sidebar layout, with a live swatch of the current
-                                // brush color baked into the button itself.
-                                let color_btn_fill = if self.show_custom_color_window { C_TEAL.gamma_multiply(0.15) } else { C_SURFACE0 };
-                                let color_btn_txt = if self.show_custom_color_window { C_TEAL } else { C_SUBTEXT };
-                                let color_btn = egui::Button::new(
-                                    egui::RichText::new(" \u{1f3a8} Color   ").color(color_btn_txt).size(13.0),
-                                )
-                                .fill(color_btn_fill)
-                                .corner_radius(CornerRadius::same(5));
-                                let color_resp = ui.add(color_btn);
-                                let swatch_rect = egui::Rect::from_min_size(
-                                    color_resp.rect.right_top() + egui::vec2(-16.0, 6.0),
-                                    egui::vec2(10.0, 10.0),
-                                );
-                                ui.painter().rect_filled(swatch_rect, CornerRadius::same(2), self.texture.brush_color);
-                                ui.painter().rect_stroke(
-                                    swatch_rect,
-                                    CornerRadius::same(2),
-                                    Stroke::new(1.0, Color32::from_gray(140)),
-                                    egui::StrokeKind::Middle,
-                                );
-                                if color_resp.clicked() {
-                                    self.show_custom_color_window = !self.show_custom_color_window;
-                                }
-                            });
-                        }
-                    }
-                });
-
-                ui.add_space(8.0);
+                        });
+                    });
+                    ui.add_space(8.0);
+                }
             });
 
         // ── Bottom status bar ───────────────────────────────────────────────
@@ -1211,6 +1132,456 @@ ui.painter().rect_filled(rect, CornerRadius::same(2), color);
                 });
             });
 
+        // ── Left/Right Sidepanels for Texture Studio ───────────────────────────
+        if self.mode == AppMode::TextureCreator {
+            let panel_dark = Color32::from_rgb(20, 20, 24);
+            let panel_border = Color32::from_rgb(38, 38, 46);
+
+            // LEFT PANEL
+            egui::SidePanel::left("texture_left_panel")
+                .resizable(false)
+                .default_width(200.0)
+                .frame(egui::Frame {
+                    fill: panel_dark,
+                    inner_margin: egui::Margin::symmetric(12, 12),
+                    stroke: Stroke::new(1.0, panel_border),
+                    ..Default::default()
+                })
+                .show(ctx, |ui| {
+                    ui.set_width(200.0);
+                    // Shape selector
+                    ui.label(
+                        egui::RichText::new("Preview")
+                            .size(11.0)
+                            .color(Color32::from_gray(120))
+                            .strong(),
+                    );
+                    ui.add_space(6.0);
+
+                    ui.horizontal_wrapped(|ui| {
+                        for s in [PreviewShape::Torch, PreviewShape::Cube, PreviewShape::Cross, PreviewShape::Wall] {
+                            let active = self.preview_shape == s;
+                            let fill = if active { C_BLUE.gamma_multiply(0.25) } else { Color32::from_rgb(40, 40, 50) };
+                            let txt  = if active { C_BLUE } else { Color32::from_gray(150) };
+                            let btn = egui::Button::new(
+                                egui::RichText::new(s.label()).color(txt).size(11.0),
+                            )
+                            .fill(fill)
+                            .corner_radius(CornerRadius::same(4));
+                            if ui.add(btn).clicked() {
+                                self.preview_shape = s;
+                            }
+                        }
+                    });
+
+                    ui.add_space(8.0);
+
+                    // Preview canvas – fills remaining width / square
+                    let avail_w = ui.available_width();
+                    let preview_side = avail_w.min(180.0).max(120.0);
+                    let (preview_rect, preview_resp) = ui.allocate_exact_size(
+                        egui::vec2(preview_side, preview_side),
+                        egui::Sense::click_and_drag(),
+                    );
+                    let painter = ui.painter();
+                    painter.rect_filled(preview_rect, CornerRadius::same(4), Color32::from_rgb(18, 18, 22));
+                    painter.rect_stroke(
+                        preview_rect,
+                        CornerRadius::same(4),
+                        Stroke::new(1.0, panel_border),
+                        egui::StrokeKind::Middle,
+                    );
+
+                    // Drag to orbit
+                    let is_wall = self.preview_shape == PreviewShape::Wall;
+                    if !is_wall && preview_resp.dragged() {
+                        let d = preview_resp.drag_delta();
+                        self.preview_yaw   -= d.x * 0.014;
+                        self.preview_pitch  = (self.preview_pitch - d.y * 0.014).clamp(-1.35, 1.35);
+                    }
+                    if !is_wall && !preview_resp.dragged() && !preview_resp.hovered() {
+                        self.preview_yaw += ctx.input(|i| i.stable_dt) * 0.25;
+                        ctx.request_repaint();
+                    }
+
+                    self.texture.ensure_texture(ctx);
+                    let center = preview_rect.center();
+                    let scale  = preview_side * 0.32;
+                    if let Some(tid) = self.texture.texture.as_ref().map(|t| t.id()) {
+                        match self.preview_shape {
+                            PreviewShape::Wall => {
+                                let img_side = preview_side * 0.78;
+                                let img_rect = egui::Rect::from_center_size(center, egui::vec2(img_side, img_side));
+                                egui::Image::new((tid, img_rect.size())).paint_at(ui, img_rect);
+                            }
+                            PreviewShape::Cube => {
+                                draw_cube3d(painter, tid, center, scale, (1.0, 1.0, 1.0), self.preview_yaw, self.preview_pitch, true, Color32::WHITE, None);
+                            }
+                            PreviewShape::Cross => {
+                                draw_cross3d(painter, tid, center, scale, self.preview_yaw, self.preview_pitch);
+                            }
+                            PreviewShape::Torch => {
+                                draw_cube3d(
+                                    painter, tid, center, scale,
+                                    (0.16, 0.8, 0.16), self.preview_yaw, self.preview_pitch, true, Color32::WHITE,
+                                    Some(egui::Rect::from_min_max(
+                                        egui::pos2(7.0 / 16.0, 6.0 / 16.0),
+                                        egui::pos2(9.0 / 16.0, 16.0 / 16.0),
+                                    )),
+                                );
+                            }
+                        }
+                    } else {
+                        painter.text(
+                            center,
+                            egui::Align2::CENTER_CENTER,
+                            "Paint or\nload texture",
+                            egui::FontId::proportional(10.0),
+                            Color32::from_gray(100),
+                        );
+                    }
+
+                    ui.add_space(8.0);
+                    ui.label(
+                        egui::RichText::new("Drag to rotate")
+                            .size(9.5)
+                            .color(Color32::from_gray(80))
+                            .italics(),
+                    );
+
+                    // Block types library
+                    ui.add_space(12.0);
+                    ui.separator();
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            egui::RichText::new("Saved Blocks")
+                                .size(11.0)
+                                .color(Color32::from_gray(120))
+                                .strong(),
+                        );
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            let save_btn = egui::Button::new(
+                                egui::RichText::new("+").color(C_GREEN).size(14.0),
+                            )
+                            .fill(C_GREEN.gamma_multiply(0.15))
+                            .corner_radius(CornerRadius::same(4));
+                            if ui.add(save_btn).on_hover_text("Save current texture as block").clicked() {
+                                self.save_current_as_block(ctx);
+                            }
+                        });
+                    });
+                    ui.add_space(6.0);
+
+                    let mut load_idx: Option<usize>   = None;
+                    let mut delete_idx: Option<usize> = None;
+                    if self.block_types.is_empty() {
+                        ui.label(
+                            egui::RichText::new("No blocks yet.\nPaint & click +")
+                                .size(9.5)
+                                .color(Color32::from_gray(80))
+                                .italics(),
+                        );
+                    } else {
+                        egui::ScrollArea::vertical()
+                            .id_source("left_block_library")
+                            .max_height(120.0)
+                            .show(ui, |ui| {
+                                egui::Grid::new("block_types_grid_left")
+                                    .spacing([4.0, 4.0])
+                                    .show(ui, |ui| {
+                                        let mut col = 0;
+                                        for (i, block) in self.block_types.iter().enumerate() {
+                                            let size = egui::vec2(34.0, 34.0);
+                                            let resp = if let Some(tex) = &block.texture {
+                                                ui.add(
+                                                    egui::ImageButton::new((tex.id(), size))
+                                                        .corner_radius(CornerRadius::same(3)),
+                                                )
+                                            } else {
+                                                ui.add_sized(size, egui::Button::new(""))
+                                            };
+                                            if resp.clicked() { load_idx = Some(i); }
+                                            resp.on_hover_text(format!("{}\nLeft-click: load\nRight-click: delete", block.name))
+                                                .context_menu(|ui| {
+                                                    if ui.button("Load into canvas").clicked() { load_idx = Some(i); ui.close_menu(); }
+                                                    if ui.button("Delete").clicked() { delete_idx = Some(i); ui.close_menu(); }
+                                                });
+                                            col += 1;
+                                            if col >= 4 { col = 0; ui.end_row(); }
+                                        }
+                                    });
+                            });
+                    }
+                    if let Some(i) = load_idx   { self.load_block_into_canvas(i, ctx); }
+                    if let Some(i) = delete_idx { self.delete_block(i); }
+                });
+
+            // RIGHT PANEL
+            egui::SidePanel::right("texture_right_panel")
+                .resizable(false)
+                .default_width(220.0)
+                .frame(egui::Frame {
+                    fill: panel_dark,
+                    inner_margin: egui::Margin::symmetric(12, 12),
+                    stroke: Stroke::new(1.0, panel_border),
+                    ..Default::default()
+                })
+                .show(ctx, |ui| {
+                    ui.set_width(220.0);
+                    egui::ScrollArea::vertical()
+                        .id_source("right_palette_tools")
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            ui.set_width(200.0);
+
+                            // ── Color picker ────────────────────
+                            egui::color_picker::color_picker_color32(
+                                ui,
+                                &mut self.texture.brush_color,
+                                egui::color_picker::Alpha::OnlyBlend,
+                            );
+
+                            ui.add_space(8.0);
+
+                            // Hex input
+                            ui.horizontal(|ui| {
+                                let (r, g, b) = (self.texture.brush_color.r(), self.texture.brush_color.g(), self.texture.brush_color.b());
+                                // Color swatch
+                                let (rect, _) = ui.allocate_exact_size(egui::vec2(22.0, 22.0), egui::Sense::hover());
+                                ui.painter().rect_filled(rect, CornerRadius::same(3), self.texture.brush_color);
+                                ui.painter().rect_stroke(rect, CornerRadius::same(3), Stroke::new(1.0, Color32::from_gray(80)), egui::StrokeKind::Middle);
+                                let mut hex = format!("#{:02X}{:02X}{:02X}", r, g, b);
+                                let resp = ui.add(
+                                    egui::TextEdit::singleline(&mut hex)
+                                        .desired_width(90.0)
+                                        .font(egui::TextStyle::Monospace),
+                                );
+                                if resp.lost_focus() {
+                                    if let Some((r2, g2, b2)) = parse_hex_color(&hex) {
+                                        self.texture.brush_color = Color32::from_rgba_unmultiplied(r2, g2, b2, self.texture.brush_color.a());
+                                    }
+                                }
+                            });
+
+                            ui.add_space(12.0);
+                            ui.separator();
+                            ui.add_space(10.0);
+
+                            // ── Quick palette ────────────────────
+                            ui.label(
+                                egui::RichText::new("Palette")
+                                    .size(10.0)
+                                    .color(Color32::from_gray(110))
+                                    .strong(),
+                            );
+                            ui.add_space(4.0);
+                            const PALETTE: [Color32; 16] = [
+                                Color32::from_rgb(0, 0, 0),
+                                Color32::from_rgb(255, 255, 255),
+                                Color32::from_rgb(136, 136, 136),
+                                Color32::from_rgb(70, 70, 70),
+                                Color32::from_rgb(200, 60, 60),
+                                Color32::from_rgb(230, 140, 50),
+                                Color32::from_rgb(230, 210, 60),
+                                Color32::from_rgb(140, 200, 80),
+                                Color32::from_rgb(60, 170, 100),
+                                Color32::from_rgb(70, 150, 220),
+                                Color32::from_rgb(100, 80, 220),
+                                Color32::from_rgb(180, 80, 200),
+                                Color32::from_rgb(140, 90, 50),
+                                Color32::from_rgb(90, 60, 40),
+                                Color32::from_rgb(210, 170, 100),
+                                Color32::from_rgb(50, 120, 90),
+                            ];
+                            egui::Grid::new("palette_grid_r")
+                                .spacing([3.0, 3.0])
+                                .show(ui, |ui| {
+                                    for (i, &c) in PALETTE.iter().enumerate() {
+                                        let size = egui::vec2(20.0, 20.0);
+                                        let (rect, resp) = ui.allocate_exact_size(size, egui::Sense::click());
+                                        let is_active = self.texture.brush_color == c;
+                                        ui.painter().rect_filled(rect, CornerRadius::same(3), c);
+                                        ui.painter().rect_stroke(
+                                            rect, CornerRadius::same(3),
+                                            Stroke::new(if is_active { 2.0 } else { 0.5 },
+                                                        if is_active { Color32::WHITE } else { Color32::from_gray(50) }),
+                                            egui::StrokeKind::Middle,
+                                        );
+                                        if resp.clicked() { self.texture.brush_color = c; }
+                                        if (i + 1) % 8 == 0 { ui.end_row(); }
+                                    }
+                                });
+
+                            ui.add_space(12.0);
+                            ui.separator();
+                            ui.add_space(10.0);
+
+                            // ── Tools ───────────────────────────
+                            ui.label(
+                                egui::RichText::new("Tools")
+                                    .size(10.0)
+                                    .color(Color32::from_gray(110))
+                                    .strong(),
+                            );
+                            ui.add_space(6.0);
+                            egui::Grid::new("tool_grid_r")
+                                .spacing([4.0, 4.0])
+                                .show(ui, |ui| {
+                                    for (tool, shortcut) in [
+                                        (Tool::Brush,      "B"),
+                                        (Tool::Eraser,     "E"),
+                                        (Tool::Fill,       "G"),
+                                        (Tool::Eyedropper, "I"),
+                                    ] {
+                                        let is_active = self.texture.tool == tool;
+                                        let fill = if is_active { C_BLUE.gamma_multiply(0.3) } else { Color32::from_rgb(40, 40, 52) };
+                                        let txt  = if is_active { C_BLUE } else { Color32::from_gray(170) };
+                                        let lbl  = format!("{} {} [{}]", tool.icon(), tool.label(), shortcut);
+                                        let btn  = egui::Button::new(
+                                            egui::RichText::new(&lbl).color(txt).size(12.0),
+                                        )
+                                        .fill(fill)
+                                        .corner_radius(CornerRadius::same(4));
+                                        if ui.add(btn).clicked() { self.texture.tool = tool; }
+                                        ui.end_row();
+                                    }
+                                });
+
+                            ui.add_space(8.0);
+
+                            // Mirror toggles
+                            ui.horizontal(|ui| {
+                                let mx_fill = if self.texture.mirror_x { C_MAUVE.gamma_multiply(0.25) } else { Color32::from_rgb(40, 40, 52) };
+                                let mx_txt  = if self.texture.mirror_x { C_MAUVE } else { Color32::from_gray(130) };
+                                let my_fill = if self.texture.mirror_y { C_MAUVE.gamma_multiply(0.25) } else { Color32::from_rgb(40, 40, 52) };
+                                let my_txt  = if self.texture.mirror_y { C_MAUVE } else { Color32::from_gray(130) };
+                                let mx_btn = egui::Button::new(egui::RichText::new("↔ X").color(mx_txt).size(12.0)).fill(mx_fill).corner_radius(CornerRadius::same(4));
+                                let my_btn = egui::Button::new(egui::RichText::new("↕ Y").color(my_txt).size(12.0)).fill(my_fill).corner_radius(CornerRadius::same(4));
+                                if ui.add(mx_btn).clicked() { self.texture.mirror_x = !self.texture.mirror_x; }
+                                if ui.add(my_btn).clicked() { self.texture.mirror_y = !self.texture.mirror_y; }
+                            });
+
+                            ui.add_space(12.0);
+                            ui.separator();
+                            ui.add_space(10.0);
+
+                            // ── Canvas size ──────────────────────
+                            ui.label(
+                                egui::RichText::new("Canvas Size")
+                                    .size(10.0)
+                                    .color(Color32::from_gray(110))
+                                    .strong(),
+                            );
+                            ui.add_space(6.0);
+                            ui.horizontal_wrapped(|ui| {
+                                for &sz in &[8usize, 16, 32, 64] {
+                                    let is_active = self.texture.canvas_size_setting == sz;
+                                    let fill = if is_active { C_TEAL.gamma_multiply(0.25) } else { Color32::from_rgb(40, 40, 52) };
+                                    let txt  = if is_active { C_TEAL } else { Color32::from_gray(130) };
+                                    let label = format!("{}px", sz);
+                                    let btn = egui::Button::new(egui::RichText::new(&label).color(txt).size(12.0))
+                                        .fill(fill)
+                                        .corner_radius(CornerRadius::same(4));
+                                    if ui.add(btn).clicked() {
+                                        self.texture.resize_canvas(sz, ctx);
+                                        self.set_status(format!("Canvas resized to {}x{}", sz, sz), StatusKind::Success);
+                                    }
+                                }
+                            });
+
+                            ui.add_space(12.0);
+                            ui.separator();
+                            ui.add_space(10.0);
+
+                            // ── File actions ─────────────────────
+                            ui.label(
+                                egui::RichText::new("File")
+                                    .size(10.0)
+                                    .color(Color32::from_gray(110))
+                                    .strong(),
+                            );
+                            ui.add_space(6.0);
+
+                            let btn_w = 200.0 - 24.0;
+
+                            // Import via file dialog
+                            let imp_btn = egui::Button::new(
+                                egui::RichText::new("📂 Import PNG…").color(C_BLUE).size(12.0),
+                            ).fill(C_BLUE.gamma_multiply(0.15)).corner_radius(CornerRadius::same(4)).min_size(egui::vec2(btn_w, 26.0));
+                            if ui.add(imp_btn).clicked() { self.import_texture(ctx); }
+
+                            ui.add_space(4.0);
+
+                            // Save
+                            let save_btn = egui::Button::new(
+                                egui::RichText::new("💾 Save PNG…").color(C_GREEN).size(12.0),
+                            ).fill(C_GREEN.gamma_multiply(0.15)).corner_radius(CornerRadius::same(4)).min_size(egui::vec2(btn_w, 26.0));
+                            if ui.add(save_btn).clicked() { self.save_texture(); }
+
+                            ui.add_space(4.0);
+
+                            // Clear
+                            let clear_btn = egui::Button::new(
+                                egui::RichText::new("🗑 Clear Canvas").color(C_RED).size(12.0),
+                            ).fill(C_RED.gamma_multiply(0.12)).corner_radius(CornerRadius::same(4)).min_size(egui::vec2(btn_w, 26.0));
+                            if ui.add(clear_btn).clicked() {
+                                self.texture.push_undo();
+                                let sz = self.texture.canvas_size_setting;
+                                self.texture.canvas = RgbaImage::new(sz as u32, sz as u32);
+                                self.texture.texture = None;
+                                self.texture.ensure_texture(ctx);
+                                self.set_status("Canvas cleared", StatusKind::Info);
+                            }
+
+                            ui.add_space(12.0);
+                            ui.separator();
+                            ui.add_space(8.0);
+
+                            // ── Import from path ─────────────────
+                            ui.label(
+                                egui::RichText::new("Import from Path")
+                                    .size(10.0)
+                                    .color(Color32::from_gray(110))
+                                    .strong(),
+                            );
+                            ui.add_space(4.0);
+                            let response = ui.add(
+                                egui::TextEdit::singleline(&mut self.texture.path_input)
+                                    .hint_text("Paste absolute path…")
+                                    .desired_width(btn_w)
+                                    .font(egui::TextStyle::Small),
+                            );
+                            ui.add_space(4.0);
+                            let load_btn = egui::Button::new(
+                                egui::RichText::new("Load from Path").color(C_MAUVE).size(12.0),
+                            ).fill(C_MAUVE.gamma_multiply(0.15)).corner_radius(CornerRadius::same(4)).min_size(egui::vec2(btn_w, 26.0));
+                            let load_clicked = ui.add(load_btn).clicked();
+
+                            if load_clicked || (response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter))) {
+                                let path_raw = self.texture.path_input.trim().trim_matches('"');
+                                if !path_raw.is_empty() {
+                                    let path = std::path::PathBuf::from(path_raw);
+                                    match image::open(&path) {
+                                        Ok(img) => {
+                                            let sz = self.texture.canvas_size_setting;
+                                            let resized = img.resize_exact(sz as u32, sz as u32, image::imageops::FilterType::Nearest).to_rgba8();
+                                            self.texture.push_undo();
+                                            self.texture.canvas = resized;
+                                            self.texture.texture = None;
+                                            self.texture.ensure_texture(ctx);
+                                            self.set_status(format!("Loaded {}x{} from path", sz, sz), StatusKind::Success);
+                                        }
+                                        Err(e) => {
+                                            self.set_status(format!("Failed to load path: {e}"), StatusKind::Error);
+                                        }
+                                    }
+                                }
+                            }
+                        });
+                });
+        }
+
         // ── Central content ────────────────────────────────────────────────────
         egui::CentralPanel::default()
             .frame(egui::Frame {
@@ -1237,278 +1608,9 @@ ui.painter().rect_filled(rect, CornerRadius::same(2), color);
                         }
                     }
                     AppMode::TextureCreator => {
-                        // Prototype layout: left = canvas (light gray bg, black grid),
-                        // right = white panels with black borders: "color" (top) + "block types" (bottom)
-                        ui.horizontal(|ui| {
-                            ui.set_min_height(ui.available_height());
-
-                            // Left: canvas / grid area (60%)
-                            ui.vertical_centered(|ui| {
-                                ui.add_space(6.0);
-                                self.show_texture_canvas(ui, ctx);
-                            });
-
-                            ui.add_space(1.0);
-
-                            // Right panel: white-framed "color" + "block types" sections
-                            ui.vertical(|ui| {
-                                ui.set_width(200.0);
-                                ui.set_min_height(ui.available_height());
-
-                                egui::ScrollArea::vertical()
-                                    .auto_shrink([false, false])
-                                    .show(ui, |ui| {
-
-                                // ── Color section (top ~50%) — WHITE bg, BLACK border ──
-                                egui::Frame {
-                                    fill: Color32::WHITE,
-                                    inner_margin: egui::Margin::symmetric(10, 8),
-                                    corner_radius: CornerRadius::same(0),
-                                    stroke: Stroke::new(1.0, Color32::BLACK),
-                                    ..Default::default()
-                                }
-                                .show(ui, |ui| {
-                                    ui.set_min_height(ui.available_height() * 0.45);
-                                    ui.vertical(|ui| {
-                                        ui.label(
-                                            egui::RichText::new("color")
-                                                .size(14.0)
-                                                .color(Color32::BLACK)
-                                                .strong(),
-                                        );
-                                        ui.add_space(8.0);
-
-                                        // Full color picker — embedded directly and
-                                        // always visible, exactly the wheel + hex +
-                                        // alpha slider widget, no extra click needed.
-                                        egui::color_picker::color_picker_color32(
-                                            ui,
-                                            &mut self.texture.brush_color,
-                                            egui::color_picker::Alpha::OnlyBlend,
-                                        );
-
-                                        ui.add_space(8.0);
-
-                                        // Preset palette — a second, always-reliable way to
-                                        // change the paint color (in case the native color
-                                        // wheel popup is finicky on some platforms).
-                                        ui.label(
-                                            egui::RichText::new("palette")
-                                                .size(11.0)
-                                                .color(Color32::from_gray(80))
-                                                .strong(),
-                                        );
-                                        ui.add_space(4.0);
-                                        const PALETTE: [Color32; 12] = [
-                                            Color32::from_rgb(0, 0, 0),
-                                            Color32::from_rgb(255, 255, 255),
-                                            Color32::from_rgb(136, 136, 136),
-                                            Color32::from_rgb(200, 60, 60),
-                                            Color32::from_rgb(230, 140, 50),
-                                            Color32::from_rgb(230, 210, 60),
-                                            Color32::from_rgb(90, 170, 80),
-                                            Color32::from_rgb(60, 140, 90),
-                                            Color32::from_rgb(70, 120, 200),
-                                            Color32::from_rgb(120, 80, 200),
-                                            Color32::from_rgb(140, 90, 50),
-                                            Color32::from_rgb(90, 60, 40),
-                                        ];
-                                        egui::Grid::new("palette_grid")
-                                            .spacing([4.0, 4.0])
-                                            .show(ui, |ui| {
-                                                for (i, &c) in PALETTE.iter().enumerate() {
-                                                    let size = egui::vec2(18.0, 18.0);
-                                                    let (rect, resp) =
-                                                        ui.allocate_exact_size(size, egui::Sense::click());
-                                                    let is_active = self.texture.brush_color == c;
-                                                    ui.painter().rect_filled(rect, CornerRadius::same(2), c);
-                                                    ui.painter().rect_stroke(
-                                                        rect,
-                                                        CornerRadius::same(2),
-                                                        Stroke::new(if is_active { 2.0 } else { 1.0 }, if is_active { Color32::from_rgb(70, 120, 200) } else { Color32::from_gray(160) }),
-                                                        egui::StrokeKind::Middle,
-                                                    );
-                                                    if resp.clicked() {
-                                                        self.texture.brush_color = c;
-                                                    }
-                                                    if (i + 1) % 6 == 0 {
-                                                        ui.end_row();
-                                                    }
-                                                }
-                                            });
-                                    });
-                                });
-
-                                ui.add_space(1.0);
-
-                                // ── Block types section (bottom ~50%) — WHITE bg, BLACK border ──
-                                egui::Frame {
-                                    fill: Color32::WHITE,
-                                    inner_margin: egui::Margin::symmetric(10, 8),
-                                    corner_radius: CornerRadius::same(0),
-                                    stroke: Stroke::new(1.0, Color32::BLACK),
-                                    ..Default::default()
-                                }
-                                .show(ui, |ui| {
-                                    ui.set_min_height(ui.available_height() * 0.45);
-                                    ui.vertical(|ui| {
-                                        ui.horizontal(|ui| {
-                                            ui.label(
-                                                egui::RichText::new("block types")
-                                                    .size(14.0)
-                                                    .color(Color32::BLACK)
-                                                    .strong(),
-                                            );
-                                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                                if accent_button(ui, " + Save ", Color32::from_rgb(200, 240, 210), Color32::from_rgb(20, 120, 60)) {
-                                                    self.save_current_as_block(ctx);
-                                                }
-                                            });
-                                        });
-                                        ui.add_space(6.0);
-
-                                        // Library of saved block textures
-                                        let mut load_idx: Option<usize> = None;
-                                        let mut delete_idx: Option<usize> = None;
-                                        if self.block_types.is_empty() {
-                                            ui.label(
-                                                egui::RichText::new("No blocks saved yet — paint a texture, then click \"+ Save\".")
-                                                    .size(10.5)
-                                                    .color(Color32::from_gray(130))
-                                                    .italics(),
-                                            );
-                                        } else {
-                                            egui::ScrollArea::vertical()
-                                                .max_height(110.0)
-                                                .show(ui, |ui| {
-                                                    egui::Grid::new("block_types_grid")
-                                                        .spacing([5.0, 5.0])
-                                                        .show(ui, |ui| {
-                                                            let mut col = 0;
-                                                            for (i, block) in self.block_types.iter().enumerate() {
-                                                                let size = egui::vec2(32.0, 32.0);
-                                                                let resp = if let Some(tex) = &block.texture {
-                                                                    ui.add(
-                                                                        egui::ImageButton::new((tex.id(), size))
-                                                                            .corner_radius(CornerRadius::same(2)),
-                                                                    )
-                                                                } else {
-                                                                    ui.add_sized(size, egui::Button::new(""))
-                                                                };
-                                                                if resp.clicked() {
-                                                                    load_idx = Some(i);
-                                                                }
-resp.on_hover_text(format!(
-                                                                     "{}\nLeft-click: load into canvas\nRight-click: delete",
-                                                                     block.name
-                                                                 ))
-                                                                     .context_menu(|ui| {
-                                                                    if ui.button("Load into canvas").clicked() {
-                                                                        load_idx = Some(i);
-                                                                        ui.close_menu();
-                                                                    }
-                                                                    if ui.button("Delete").clicked() {
-                                                                        delete_idx = Some(i);
-                                                                        ui.close_menu();
-                                                                    }
-                                                                });
-                                                                col += 1;
-                                                                if col >= 4 {
-                                                                    col = 0;
-                                                                    ui.end_row();
-                                                                }
-                                                            }
-                                                        });
-                                                });
-                                        }
-                                        if let Some(i) = load_idx {
-                                            self.load_block_into_canvas(i, ctx);
-                                        }
-                                        if let Some(i) = delete_idx {
-                                            self.delete_block(i);
-                                        }
-
-                                        ui.add_space(8.0);
-                                        ui.separator();
-                                        ui.add_space(4.0);
-
-                                        // Tool selection
-                                        ui.label(
-                                            egui::RichText::new("tool")
-                                                .size(11.0)
-                                                .color(Color32::from_gray(80))
-                                                .strong(),
-                                        );
-                                        ui.add_space(4.0);
-
-                                        egui::Grid::new("tool_grid")
-                                            .spacing([4.0, 4.0])
-                                            .show(ui, |ui| {
-                                                for tool in [Tool::Brush, Tool::Eraser, Tool::Fill, Tool::Eyedropper] {
-                                                    let is_active = self.texture.tool == tool;
-                                                    let fill = if is_active { Color32::from_rgb(200, 220, 255) } else { Color32::from_gray(235) };
-                                                    let txt = if is_active { Color32::from_rgb(30, 80, 180) } else { Color32::from_gray(60) };
-                                                    let label = format!(" {} {} ", tool.icon(), tool.label());
-                                                    if accent_button(ui, &label, fill, txt) {
-                                                        self.texture.tool = tool;
-                                                    }
-                                                }
-                                                ui.end_row();
-                                            });
-
-                                        ui.add_space(8.0);
-
-                                        // Canvas size
-                                        ui.label(
-                                            egui::RichText::new("canvas")
-                                                .size(11.0)
-                                                .color(Color32::from_gray(80))
-                                                .strong(),
-                                        );
-                                        ui.add_space(4.0);
-                                        ui.horizontal(|ui| {
-                                            for &sz in &[8usize, 16, 32, 64] {
-                                                let is_active = self.texture.canvas_size_setting == sz;
-                                                let fill = if is_active { Color32::from_rgb(200, 235, 220) } else { Color32::from_gray(235) };
-                                                let txt = if is_active { Color32::from_rgb(20, 120, 80) } else { Color32::from_gray(100) };
-                                                let label = format!("{}x{}", sz, sz);
-                                                if accent_button(ui, &label, fill, txt) {
-                                                    self.texture.resize_canvas(sz, ctx);
-                                                    self.set_status(
-                                                        format!("Canvas resized to {}x{}", sz, sz),
-                                                        StatusKind::Success,
-                                                    );
-                                                }
-                                            }
-                                        });
-
-                                        ui.add_space(12.0);
-
-                                        // Action buttons
-                                        ui.vertical_centered(|ui| {
-                                            if accent_button(ui, "  Clear  ", Color32::from_rgb(240, 200, 200), Color32::from_rgb(180, 40, 40)) {
-                                                self.texture.push_undo();
-                                                let sz = self.texture.canvas_size_setting;
-                                                self.texture.canvas = RgbaImage::new(sz as u32, sz as u32);
-                                                self.texture.texture = None;
-                                                self.texture.ensure_texture(ctx);
-                                                self.set_status("Canvas cleared", StatusKind::Info);
-                                            }
-                                            ui.add_space(4.0);
-                                            ui.horizontal(|ui| {
-                                                if accent_button(ui, "  Import  ", Color32::from_rgb(200, 220, 255), Color32::from_rgb(30, 80, 180)) {
-                                                    self.import_texture(ctx);
-                                                }
-                                                ui.add_space(4.0);
-                                                if accent_button(ui, "  Save  ", Color32::from_rgb(200, 240, 210), Color32::from_rgb(20, 120, 60)) {
-                                                    self.save_texture();
-                                                }
-                                            });
-                                        });
-                                    });
-                                });
-                            });
-                        });
+                        ui.vertical_centered(|ui| {
+                            ui.add_space(4.0);
+                            self.show_texture_canvas(ui, ctx);
                         });
                     }
                 }
@@ -1633,7 +1735,7 @@ resp.on_hover_text(format!(
                                 );
                             }
                             PreviewShape::Cube => {
-                                draw_cube3d(painter, tid, center, scale, (1.0, 1.0, 1.0), yaw, pitch, true, Color32::WHITE);
+                                draw_cube3d(painter, tid, center, scale, (1.0, 1.0, 1.0), yaw, pitch, true, Color32::WHITE, None);
                             }
                             PreviewShape::Cross => {
                                 draw_cross3d(painter, tid, center, scale, yaw, pitch);
@@ -1644,7 +1746,11 @@ resp.on_hover_text(format!(
                                 // pixel art wrapped around one elongated shape.
                                 draw_cube3d(
                                     painter, tid, center, scale,
-                                    (0.28, 1.0, 0.28), yaw, pitch, true, Color32::WHITE,
+                                    (0.16, 0.8, 0.16), yaw, pitch, true, Color32::WHITE,
+                                    Some(egui::Rect::from_min_max(
+                                        egui::pos2(7.0 / 16.0, 6.0 / 16.0),
+                                        egui::pos2(9.0 / 16.0, 16.0 / 16.0),
+                                    )),
                                 );
                             }
                         }
@@ -1773,6 +1879,7 @@ fn draw_cube3d(
     pitch: f32,
     textured: bool,
     base_color: Color32,
+    uv_rect: Option<egui::Rect>,
 ) {
     let (hx, hy, hz) = half;
     let corners_local = [
@@ -1791,10 +1898,11 @@ fn draw_cube3d(
         .collect();
     let screen: Vec<egui::Pos2> = rotated.iter().map(|v| project(*v, screen_center, scale)).collect();
 
-    let uv00 = egui::pos2(0.0, 0.0);
-    let uv10 = egui::pos2(1.0, 0.0);
-    let uv11 = egui::pos2(1.0, 1.0);
-    let uv01 = egui::pos2(0.0, 1.0);
+    let rect = uv_rect.unwrap_or_else(|| egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)));
+    let uv00 = rect.min;
+    let uv10 = egui::pos2(rect.max.x, rect.min.y);
+    let uv11 = rect.max;
+    let uv01 = egui::pos2(rect.min.x, rect.max.y);
     let uvs = [uv00, uv10, uv11, uv01];
 
     // (corner indices in perimeter order, local outward normal)
@@ -2019,24 +2127,38 @@ fn show_texture_canvas(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         let display_w = max_w.max(tex_sz.x * 8.0);
         let display_h = display_w / (tex_sz.x / tex_sz.y);
 
-        let canvas_bg = Color32::BLACK;
+        let canvas_bg = Color32::from_rgb(22, 22, 28);
         egui::Frame {
             fill: canvas_bg,
             inner_margin: egui::Margin::symmetric(2, 2),
-            corner_radius: CornerRadius::same(0),
-            stroke: Stroke::new(1.0, Color32::from_gray(90)),
+            corner_radius: CornerRadius::same(4),
+            stroke: Stroke::new(1.5, Color32::from_rgb(55, 55, 70)),
             ..Default::default()
         }
         .show(ui, |ui| {
-            ui.painter().rect_filled(
-                egui::Rect::from_min_size(ui.cursor().left_top(), egui::vec2(display_w, display_h)),
-                CornerRadius::same(0),
-                canvas_bg,
-            );
+            let canvas_rect = egui::Rect::from_min_size(ui.cursor().left_top(), egui::vec2(display_w, display_h));
+
+            // Checkered transparency background
+            if let Some(chk_id) = self.texture.checker_texture.as_ref().map(|t| t.id()) {
+                let uv = egui::Rect::from_min_max(
+                    egui::pos2(0.0, 0.0),
+                    egui::pos2(display_w / 16.0, display_h / 16.0),
+                );
+                let mut mesh = egui::Mesh::with_texture(chk_id);
+                mesh.add_rect_with_uv(canvas_rect, uv, Color32::WHITE);
+                ui.painter().add(egui::Shape::mesh(mesh));
+            } else {
+                ui.painter().rect_filled(canvas_rect, CornerRadius::same(0), Color32::from_rgb(40, 40, 50));
+            }
+
+            // Advance cursor past checker area so the image overlays correctly
+            let (_, _) = ui.allocate_exact_size(egui::vec2(display_w, display_h), egui::Sense::hover());
 
             if let Some(tex_id) = tex_id {
-                let image_response = ui.add(
-                    egui::Image::new((tex_id, egui::vec2(display_w, display_h)))
+                // Paint the actual texture on top of the checker
+                let image_response = ui.put(
+                    canvas_rect,
+                    egui::Image::new((tex_id, egui::vec2(display_w, display_h))),
                 );
 
                 if self.texture.show_grid && display_w / tex_sz.x > 4.0 {
