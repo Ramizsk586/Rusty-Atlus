@@ -483,7 +483,7 @@ impl AtlasApp {
                         .resize_exact(
                             self.cell_size,
                             self.cell_size,
-                            image::imageops::FilterType::Lanczos3,
+                            image::imageops::FilterType::Nearest,
                         )
                         .to_rgba8();
 
